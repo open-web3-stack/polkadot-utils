@@ -96,7 +96,7 @@
 }
 
 .network-table col:first-child {
-  width: 28%;
+  width: 26%;
 }
 
 .network-table col:nth-child(2) {
@@ -104,15 +104,19 @@
 }
 
 .network-table col:nth-child(3) {
-  width: 22%;
+  width: 16%;
 }
 
 .network-table col:nth-child(4) {
-  width: 22%;
+  width: 26%;
+}
+
+.network-table col:nth-child(5) {
+  width: 10%;
 }
 
 .network-table col:last-child {
-  width: 10%;
+  width: 4%;
 }
 
 .network-table tbody tr:last-of-type td {
@@ -149,6 +153,38 @@
 
 .status-cell {
   position: relative;
+}
+
+.upgrade-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.upgrade-info__block {
+  font-weight: 600;
+}
+
+.upgrade-info__time {
+  font-size: 0.85rem;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.upgrade-error-label {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: #f87171;
+  font-weight: 600;
+  text-align: left;
+  cursor: inherit;
+}
+
+.upgrade-error-label:focus-visible {
+  outline: 2px solid rgba(248, 113, 113, 0.45);
+  outline-offset: 3px;
+  border-radius: 6px;
 }
 
 .status-wrapper {
@@ -271,5 +307,13 @@
 
   .status-tooltip::before {
     background-color: rgba(33, 53, 71, 0.95);
+  }
+
+  .upgrade-info__time {
+    color: rgba(33, 53, 71, 0.65);
+  }
+
+  .upgrade-error-label {
+    color: #e11d48;
   }
 }
