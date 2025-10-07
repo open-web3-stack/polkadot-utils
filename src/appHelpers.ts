@@ -7,6 +7,20 @@ export type UpgradeInfo = {
 
 export const SPEC_UPGRADE_STORAGE_KEY = 'polkadot-utils:spec-upgrades'
 
+export const getSpecUpgradeStorageKey = (networkId: string) => `${SPEC_UPGRADE_STORAGE_KEY}:${networkId}`
+
+type BigIntLikeCodec = {
+  toBigInt: () => bigint
+}
+
+const hasToBigInt = (value: unknown): value is BigIntLikeCodec => {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+
+  return typeof Reflect.get(value, 'toBigInt') === 'function'
+}
+
 export const isValidUpgradeInfo = (value: unknown): value is UpgradeInfo => {
   if (typeof value !== 'object' || value === null) {
     return false
@@ -26,7 +40,11 @@ export const readTimestampMs = async (api: ApiPromise, blockHash: string) => {
     throw new Error('Timestamp value not available')
   }
 
-  const milliseconds = Number((moment as unknown as { toBigInt: () => bigint }).toBigInt())
+  if (!hasToBigInt(moment)) {
+    throw new Error('Timestamp codec does not support bigint conversion')
+  }
+
+  const milliseconds = Number(moment.toBigInt())
   if (!Number.isFinite(milliseconds)) {
     throw new Error('Timestamp value is out of range')
   }

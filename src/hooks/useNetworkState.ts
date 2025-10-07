@@ -3,6 +3,7 @@ import type { Header } from '@polkadot/types/interfaces'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   findSpecUpgradeBlock,
+  getSpecUpgradeStorageKey,
   isValidUpgradeInfo,
   readSpecVersion,
   readTimestampMs,
@@ -10,6 +11,10 @@ import {
   type UpgradeInfo,
 } from '../appHelpers'
 import { getApi, type NetworkId, networkDefinitions, refreshApi } from '../polkadotNetworks'
+
+const NETWORK_STORAGE_KEYS = new Map<NetworkId, string>(
+  networkDefinitions.map((network) => [network.id, getSpecUpgradeStorageKey(network.id)] as const),
+)
 
 export type NetworkRowState = {
   blockNumber?: number
@@ -34,8 +39,44 @@ export const useNetworkState = () => {
       return
     }
     try {
-      const entries = Array.from(specUpgradeCacheRef.current.entries())
-      window.localStorage.setItem(SPEC_UPGRADE_STORAGE_KEY, JSON.stringify(entries))
+      const groupedByNetwork = new Map<NetworkId, Array<[number, UpgradeInfo]>>()
+      for (const [cacheKey, upgradeInfo] of specUpgradeCacheRef.current.entries()) {
+        const separatorIndex = cacheKey.indexOf(':')
+        if (separatorIndex === -1) {
+          continue
+        }
+        const networkId = cacheKey.slice(0, separatorIndex) as NetworkId
+        const specVersionValue = cacheKey.slice(separatorIndex + 1)
+        const specVersion = Number.parseInt(specVersionValue, 10)
+        if (!Number.isFinite(specVersion)) {
+          continue
+        }
+        const entriesForNetwork = groupedByNetwork.get(networkId)
+        const normalizedUpgrade: UpgradeInfo = {
+          blockNumber: Math.trunc(upgradeInfo.blockNumber),
+          timestampMs: upgradeInfo.timestampMs,
+        }
+        if (entriesForNetwork) {
+          entriesForNetwork.push([specVersion, normalizedUpgrade])
+        } else {
+          groupedByNetwork.set(networkId, [[specVersion, normalizedUpgrade]])
+        }
+      }
+
+      const persistedKeys = new Set<string>()
+      for (const [networkId, entries] of groupedByNetwork) {
+        const storageKey = getSpecUpgradeStorageKey(networkId)
+        persistedKeys.add(storageKey)
+        window.localStorage.setItem(storageKey, JSON.stringify(entries))
+      }
+
+      for (const [, storageKey] of NETWORK_STORAGE_KEYS) {
+        if (!persistedKeys.has(storageKey)) {
+          window.localStorage.removeItem(storageKey)
+        }
+      }
+
+      window.localStorage.removeItem(SPEC_UPGRADE_STORAGE_KEY)
     } catch {
       // Ignore storage errors so the app keeps working even if persistence fails.
     }
@@ -45,33 +86,68 @@ export const useNetworkState = () => {
     if (typeof window === 'undefined' || !window.localStorage) {
       return
     }
-    try {
-      const storedValue = window.localStorage.getItem(SPEC_UPGRADE_STORAGE_KEY)
-      if (!storedValue) {
-        return
-      }
-      const parsedValue: unknown = JSON.parse(storedValue)
-      if (!Array.isArray(parsedValue)) {
-        return
-      }
-      const cache = specUpgradeCacheRef.current
-      for (const entry of parsedValue) {
-        if (!Array.isArray(entry) || entry.length !== 2) {
-          continue
+
+    const cache = specUpgradeCacheRef.current
+
+    const loadNetworkEntries = (networkId: NetworkId, storedValue: string) => {
+      try {
+        const parsed: unknown = JSON.parse(storedValue)
+        if (!Array.isArray(parsed)) {
+          return
         }
-        const [key, value] = entry
-        if (typeof key !== 'string' || !isValidUpgradeInfo(value)) {
-          continue
+        for (const entry of parsed) {
+          if (!Array.isArray(entry) || entry.length !== 2) {
+            continue
+          }
+          const [specVersionRaw, value] = entry
+          const specVersion = typeof specVersionRaw === 'number' ? specVersionRaw : Number.parseInt(String(specVersionRaw), 10)
+          if (!Number.isFinite(specVersion) || !isValidUpgradeInfo(value)) {
+            continue
+          }
+          cache.set(`${networkId}:${Math.trunc(specVersion)}`, {
+            blockNumber: Math.trunc(value.blockNumber),
+            timestampMs: value.timestampMs,
+          })
         }
-        cache.set(key, {
-          blockNumber: Math.trunc(value.blockNumber),
-          timestampMs: value.timestampMs,
-        })
+      } catch {
+        // Ignore storage errors so the app keeps working even if persistence fails.
       }
-    } catch {
-      // Ignore storage errors so the app keeps working even if persistence fails.
     }
-  }, [])
+
+    for (const [networkId, storageKey] of NETWORK_STORAGE_KEYS) {
+      const storedValue = window.localStorage.getItem(storageKey)
+      if (storedValue) {
+        loadNetworkEntries(networkId, storedValue)
+      }
+    }
+
+    const legacyStoredValue = window.localStorage.getItem(SPEC_UPGRADE_STORAGE_KEY)
+    if (legacyStoredValue) {
+      try {
+        const parsedValue: unknown = JSON.parse(legacyStoredValue)
+        if (Array.isArray(parsedValue)) {
+          for (const entry of parsedValue) {
+            if (!Array.isArray(entry) || entry.length !== 2) {
+              continue
+            }
+            const [key, value] = entry
+            if (typeof key !== 'string' || !isValidUpgradeInfo(value)) {
+              continue
+            }
+            cache.set(key, {
+              blockNumber: Math.trunc(value.blockNumber),
+              timestampMs: value.timestampMs,
+            })
+          }
+        }
+      } catch {
+        // Ignore storage errors so the app keeps working even if persistence fails.
+      }
+      persistSpecUpgradeCache()
+    } else {
+      window.localStorage.removeItem(SPEC_UPGRADE_STORAGE_KEY)
+    }
+  }, [persistSpecUpgradeCache])
 
   const resolveSpecUpgradeBlock = useCallback(
     async (api: ApiPromise, networkId: NetworkId, blockNumber: number, specVersion: number) => {
