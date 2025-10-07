@@ -180,7 +180,9 @@ export const useNetworkState = () => {
           if (!current) {
             return previous
           }
-          if (current.blockNumber !== blockNumber || current.specVersion !== specVersion) {
+          const currentBlockNumber = current.blockNumber
+          const currentSpecVersion = current.specVersion
+          if (currentSpecVersion !== specVersion || currentBlockNumber == null || currentBlockNumber < blockNumber) {
             return previous
           }
           const nextAttempts = Math.max(0, Math.trunc(attempts))
@@ -314,7 +316,8 @@ export const useNetworkState = () => {
                     if (!current) {
                       return previous
                     }
-                    if (current.blockNumber !== blockNumber || current.specVersion !== specVersion) {
+                    const currentBlockNumber = current.blockNumber
+                    if (current.specVersion !== specVersion || (currentBlockNumber != null && currentBlockNumber < blockNumber)) {
                       return previous
                     }
                     const currentUpgrade = current.upgradedAt
@@ -348,7 +351,8 @@ export const useNetworkState = () => {
                     if (!current) {
                       return previous
                     }
-                    if (current.blockNumber !== blockNumber || current.specVersion !== specVersion) {
+                    const currentBlockNumber = current.blockNumber
+                    if (current.specVersion !== specVersion || (currentBlockNumber != null && currentBlockNumber < blockNumber)) {
                       return previous
                     }
                     if (current.upgradeError === formattedMessage) {
