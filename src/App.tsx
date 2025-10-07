@@ -85,24 +85,51 @@ function App() {
             return
           }
 
-          setNetworkState((previous) => ({
-            ...previous,
-            [networkId]: {
-              blockNumber,
-              timestampMs,
-            },
-          }))
+          setNetworkState((previous) => {
+            const current = previous[networkId]
+            const currentBlock = current?.blockNumber
+            if (currentBlock != null) {
+              if (currentBlock > blockNumber) {
+                return previous
+              }
+              if (currentBlock === blockNumber && current?.timestampMs != null && current.timestampMs >= timestampMs) {
+                return previous
+              }
+            }
+
+            return {
+              ...previous,
+              [networkId]: {
+                blockNumber,
+                timestampMs,
+              },
+            }
+          })
         } catch (error) {
           if (cancelledRef.current) {
             return
           }
-          setNetworkState((previous) => ({
-            ...previous,
-            [networkId]: {
-              ...previous[networkId],
-              error: error instanceof Error ? error.message : String(error),
-            },
-          }))
+          const blockNumber = header.number.toNumber()
+          setNetworkState((previous) => {
+            const current = previous[networkId]
+            const currentBlock = current?.blockNumber
+            if (currentBlock != null) {
+              if (currentBlock > blockNumber) {
+                return previous
+              }
+              if (currentBlock === blockNumber && current?.timestampMs != null) {
+                return previous
+              }
+            }
+
+            return {
+              ...previous,
+              [networkId]: {
+                ...current,
+                error: error instanceof Error ? error.message : String(error),
+              },
+            }
+          })
         }
       }
 
@@ -259,15 +286,23 @@ function App() {
                   const isReady = !hasError && state?.blockNumber != null && state?.timestampMs != null
                   const statusClass = hasError ? 'status status--error' : isReady ? 'status status--ok' : 'status status--pending'
                   const statusText = hasError ? 'Error' : isReady ? 'Connected' : 'Connecting…'
+                  const tooltipId = hasError && errorMessage ? `${network.id}-error-tooltip` : undefined
                   return (
                     <tr key={network.id}>
                       <th scope="row">{labelById[network.id]}</th>
                       <td>{formatBlockNumber(state?.blockNumber)}</td>
                       <td>{hasError ? '—' : formatLocalTime(state?.timestampMs)}</td>
                       <td className="status-cell">
-                        <span className={statusClass} title={hasError ? errorMessage : undefined}>
-                          {statusText}
-                        </span>
+                        <div className={hasError ? 'status-wrapper status-wrapper--error' : 'status-wrapper'}>
+                          <span className={statusClass} aria-live="polite" tabIndex={hasError ? 0 : undefined} aria-describedby={tooltipId}>
+                            {statusText}
+                          </span>
+                          {hasError && errorMessage ? (
+                            <div className="status-tooltip" role="tooltip" id={tooltipId}>
+                              <span className="status-tooltip__message">{errorMessage}</span>
+                            </div>
+                          ) : null}
+                        </div>
                       </td>
                       <td className="actions-cell">
                         <button
