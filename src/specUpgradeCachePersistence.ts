@@ -14,23 +14,35 @@ const normalizeUpgrade = (upgrade: UpgradeInfo): UpgradeInfo => ({
   timestampMs: upgrade.timestampMs,
 })
 
-export const persistSpecUpgradeCache = (cache: Map<string, UpgradeInfo>, networkStorageKeys: Map<NetworkId, string>) => {
+export const persistSpecUpgradeCache = (
+  cache: Map<string, UpgradeInfo>,
+  networkStorageKeys: Map<NetworkId, string>,
+  currentSpecVersions?: Map<NetworkId, number>,
+) => {
   if (typeof window === 'undefined' || !window.localStorage) {
     return
   }
 
   try {
     const groupedByNetwork = new Map<NetworkId, Array<[number, UpgradeInfo]>>()
+    const staleCacheKeys: string[] = []
 
     for (const [cacheKey, upgradeInfo] of cache.entries()) {
       const separatorIndex = cacheKey.indexOf(':')
       if (separatorIndex === -1) {
+        staleCacheKeys.push(cacheKey)
         continue
       }
       const networkId = cacheKey.slice(0, separatorIndex) as NetworkId
       const specVersionValue = cacheKey.slice(separatorIndex + 1)
       const specVersion = parseSpecVersion(specVersionValue)
       if (specVersion == null) {
+        staleCacheKeys.push(cacheKey)
+        continue
+      }
+      const currentSpecVersion = currentSpecVersions?.get(networkId)
+      if (currentSpecVersion != null && specVersion !== currentSpecVersion) {
+        staleCacheKeys.push(cacheKey)
         continue
       }
       const entriesForNetwork = groupedByNetwork.get(networkId)
@@ -40,6 +52,10 @@ export const persistSpecUpgradeCache = (cache: Map<string, UpgradeInfo>, network
       } else {
         groupedByNetwork.set(networkId, [[specVersion, normalizedUpgrade]])
       }
+    }
+
+    for (const cacheKey of staleCacheKeys) {
+      cache.delete(cacheKey)
     }
 
     const persistedKeys = new Set<string>()

@@ -41,9 +41,10 @@ export const useNetworkState = () => {
   const specUpgradePromisesRef = useRef(new Map<string, Promise<UpgradeInfo>>())
   const apisRef = useRef(new Map<NetworkId, ApiPromise>())
   const pendingUpgradeRequestsRef = useRef(new Set<string>())
+  const currentSpecVersionsRef = useRef(new Map<NetworkId, number>())
 
   const persistCache = useCallback(() => {
-    persistSpecUpgradeCache(specUpgradeCacheRef.current, NETWORK_STORAGE_KEYS)
+    persistSpecUpgradeCache(specUpgradeCacheRef.current, NETWORK_STORAGE_KEYS, currentSpecVersionsRef.current)
   }, [])
 
   useEffect(() => {
@@ -371,6 +372,24 @@ export const useNetworkState = () => {
       subscriptionsRef.current.clear()
     }
   }, [connectNetwork])
+
+  useEffect(() => {
+    const specVersions = currentSpecVersionsRef.current
+    const seen = new Set<NetworkId>()
+
+    for (const [networkId, state] of Object.entries(networkState) as Array<[NetworkId, NetworkRowState | undefined]>) {
+      if (state?.specVersion != null) {
+        specVersions.set(networkId, state.specVersion)
+        seen.add(networkId)
+      }
+    }
+
+    for (const networkId of Array.from(specVersions.keys())) {
+      if (!seen.has(networkId)) {
+        specVersions.delete(networkId)
+      }
+    }
+  }, [networkState])
 
   useEffect(() => {
     if (cancelledRef.current) {
