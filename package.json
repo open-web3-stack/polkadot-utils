@@ -13,6 +13,7 @@
     "prepare": "husky"
   },
   "dependencies": {
+    "@polkadot/api": "^16.4.8",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
@@ -36,5 +37,6 @@
   },
   "overrides": {
     "vite": "npm:rolldown-vite@7.1.14"
-  }
+  },
+  "packageManager": "bun@1.2.21"
 }
