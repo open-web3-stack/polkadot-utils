@@ -2,6 +2,7 @@ import type { ApiPromise } from '@polkadot/api'
 import type { Header } from '@polkadot/types/interfaces'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  estimateSpecUpgradeSearchSteps,
   findSpecUpgradeBlock,
   getSpecUpgradeStorageKey,
   isValidUpgradeInfo,
@@ -22,6 +23,10 @@ export type NetworkRowState = {
   specVersion?: number
   upgradedAt?: UpgradeInfo
   upgradeError?: string
+  upgradeSearch?: {
+    attempts: number
+    estimatedTotal: number
+  }
   error?: string
 }
 
@@ -165,7 +170,43 @@ export const useNetworkState = () => {
         return existingPromise
       }
 
-      const promise = findSpecUpgradeBlock(api, blockNumber, specVersion)
+      const estimatedTotal = estimateSpecUpgradeSearchSteps(blockNumber)
+      const updateProgressState = (attempts: number, estimated: number) => {
+        if (cancelledRef.current) {
+          return
+        }
+        setNetworkState((previous) => {
+          const current = previous[networkId]
+          if (!current) {
+            return previous
+          }
+          if (current.blockNumber !== blockNumber || current.specVersion !== specVersion) {
+            return previous
+          }
+          const nextAttempts = Math.max(0, Math.trunc(attempts))
+          const nextEstimated = Math.max(nextAttempts, Math.trunc(estimated))
+          const currentProgress = current.upgradeSearch
+          if (currentProgress && currentProgress.attempts === nextAttempts && currentProgress.estimatedTotal === nextEstimated) {
+            return previous
+          }
+          return {
+            ...previous,
+            [networkId]: {
+              ...current,
+              upgradeSearch: {
+                attempts: nextAttempts,
+                estimatedTotal: nextEstimated,
+              },
+            },
+          }
+        })
+      }
+
+      updateProgressState(0, estimatedTotal)
+
+      const promise = findSpecUpgradeBlock(api, blockNumber, specVersion, (progress) => {
+        updateProgressState(progress.attempts, progress.estimatedTotal)
+      })
         .then((value) => {
           resolvedCache.set(cacheKey, value)
           persistSpecUpgradeCache()
@@ -256,6 +297,7 @@ export const useNetworkState = () => {
                   specVersion,
                   upgradedAt: nextUpgradedAt,
                   upgradeError: undefined,
+                  upgradeSearch: current?.specVersion === specVersion ? current?.upgradeSearch : undefined,
                   error: undefined,
                 },
               }
@@ -289,6 +331,7 @@ export const useNetworkState = () => {
                         ...current,
                         upgradedAt,
                         upgradeError: undefined,
+                        upgradeSearch: undefined,
                         error: undefined,
                       },
                     }
@@ -316,6 +359,7 @@ export const useNetworkState = () => {
                       [networkId]: {
                         ...current,
                         upgradeError: formattedMessage,
+                        upgradeSearch: undefined,
                       },
                     }
                   })
@@ -343,6 +387,7 @@ export const useNetworkState = () => {
                 [networkId]: {
                   ...current,
                   error: error instanceof Error ? error.message : String(error),
+                  upgradeSearch: undefined,
                 },
               }
             })
@@ -360,6 +405,7 @@ export const useNetworkState = () => {
               [networkId]: {
                 ...previous[networkId],
                 error: error instanceof Error ? error.message : String(error),
+                upgradeSearch: undefined,
               },
             }))
           }
@@ -375,6 +421,7 @@ export const useNetworkState = () => {
               [networkId]: {
                 ...previous[networkId],
                 error: error instanceof Error ? error.message : String(error),
+                upgradeSearch: undefined,
               },
             }))
           })
@@ -392,6 +439,7 @@ export const useNetworkState = () => {
           [networkId]: {
             ...previous[networkId],
             error: error instanceof Error ? error.message : String(error),
+            upgradeSearch: undefined,
           },
         }))
       }
@@ -412,6 +460,7 @@ export const useNetworkState = () => {
           [network.id]: {
             ...previous[network.id],
             error: error instanceof Error ? error.message : String(error),
+            upgradeSearch: undefined,
           },
         }))
       })
@@ -437,6 +486,7 @@ export const useNetworkState = () => {
           [networkId]: {
             ...previous[networkId],
             error: error instanceof Error ? error.message : String(error),
+            upgradeSearch: undefined,
           },
         }))
       })

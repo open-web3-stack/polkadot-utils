@@ -9,6 +9,14 @@ export const SPEC_UPGRADE_STORAGE_KEY = 'polkadot-utils:spec-upgrades'
 
 export const getSpecUpgradeStorageKey = (networkId: string) => `${SPEC_UPGRADE_STORAGE_KEY}:${networkId}`
 
+export type SpecUpgradeSearchProgress = {
+  attempts: number
+  estimatedTotal: number
+  lowerBound: number
+  upperBound: number
+  midpoint: number
+}
+
 type BigIntLikeCodec = {
   toBigInt: () => bigint
 }
@@ -19,6 +27,14 @@ const hasToBigInt = (value: unknown): value is BigIntLikeCodec => {
   }
 
   return typeof Reflect.get(value, 'toBigInt') === 'function'
+}
+
+export const estimateSpecUpgradeSearchSteps = (currentBlockNumber: number) => {
+  if (!Number.isFinite(currentBlockNumber) || currentBlockNumber <= 0) {
+    return 1
+  }
+  const rangeSize = Math.max(1, currentBlockNumber + 1)
+  return Math.max(1, Math.ceil(Math.log2(rangeSize)) + 1)
 }
 
 export const isValidUpgradeInfo = (value: unknown): value is UpgradeInfo => {
@@ -127,11 +143,18 @@ export const formatRelativeTime = (timestampMs: number | undefined) => {
   return 'just now'
 }
 
-export const findSpecUpgradeBlock = async (api: ApiPromise, currentBlockNumber: number, specVersion: number): Promise<UpgradeInfo> => {
+export const findSpecUpgradeBlock = async (
+  api: ApiPromise,
+  currentBlockNumber: number,
+  specVersion: number,
+  onProgress?: (progress: SpecUpgradeSearchProgress) => void,
+): Promise<UpgradeInfo> => {
   let low = 0
   let high = currentBlockNumber
   let result = currentBlockNumber
   const specVersionByBlock = new Map<number, number>([[currentBlockNumber, specVersion]])
+  const estimatedTotal = estimateSpecUpgradeSearchSteps(currentBlockNumber)
+  let attempts = 0
 
   const getSpecVersionForBlock = async (blockNumber: number): Promise<number> => {
     const cached = specVersionByBlock.get(blockNumber)
@@ -147,6 +170,14 @@ export const findSpecUpgradeBlock = async (api: ApiPromise, currentBlockNumber: 
 
   while (low <= high) {
     const mid = Math.floor((low + high) / 2)
+    attempts += 1
+    onProgress?.({
+      attempts,
+      estimatedTotal,
+      lowerBound: low,
+      upperBound: high,
+      midpoint: mid,
+    })
     const midSpecVersion = await getSpecVersionForBlock(mid)
 
     if (midSpecVersion >= specVersion) {

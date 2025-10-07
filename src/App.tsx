@@ -102,6 +102,13 @@ function App() {
                               {formatLocalTime(state.upgradedAt.timestampMs)} | {formatRelativeTime(state.upgradedAt.timestampMs)}
                             </span>
                           </div>
+                        ) : state?.upgradeSearch ? (
+                          <div className="upgrade-progress">
+                            <span className="upgrade-progress__label">Searching…</span>
+                            <span className="upgrade-progress__details">
+                              Attempt {Math.max(1, state.upgradeSearch.attempts)} of ~{state.upgradeSearch.estimatedTotal}
+                            </span>
+                          </div>
                         ) : (
                           'Loading…'
                         )}
