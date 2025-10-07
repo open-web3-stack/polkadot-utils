@@ -1,0 +1,17 @@
+scritps:
+  format: bun fix --unsafe
+  check: bun check
+rules: |
+  # React Compiler Rules
+  1) Keep components and hooks pure
+  - No side effects during render; make functions idempotent and keep props/state immutable.
+  2) Follow the Rules of React
+  - React calls components and hooks. Don’t call component functions directly; render them via JSX.
+  - Only call hooks at the top level of React functions (never in loops/conditions/nested functions).
+  3) Let the compiler handle memoization
+  - Prefer removing most manual `useMemo`, `useCallback`, and `React.memo` unless you have a proven need.
+  4) Use directives deliberately
+  - `"use memo"` at the top of a function to opt it into compilation (esp. useful in annotation mode).
+  - `"use no memo"` as a temporary escape hatch to skip optimization while debugging.
+  5) Prefer calculations in render over Effects
+  - Compute derived values during render; use Effects only to sync with external systems (DOM, network, widgets).

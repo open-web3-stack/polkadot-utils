@@ -12,6 +12,7 @@ import {
   type UpgradeInfo,
 } from '../appHelpers'
 import { getApi, type NetworkId, networkDefinitions, refreshApi } from '../polkadotNetworks'
+import { persistSpecUpgradeCache } from '../specUpgradeCachePersistence'
 
 const NETWORK_STORAGE_KEYS = new Map<NetworkId, string>(
   networkDefinitions.map((network) => [network.id, getSpecUpgradeStorageKey(network.id)] as const),
@@ -38,53 +39,11 @@ export const useNetworkState = () => {
   const cancelledRef = useRef(false)
   const specUpgradeCacheRef = useRef(new Map<string, UpgradeInfo>())
   const specUpgradePromisesRef = useRef(new Map<string, Promise<UpgradeInfo>>())
+  const apisRef = useRef(new Map<NetworkId, ApiPromise>())
+  const pendingUpgradeRequestsRef = useRef(new Set<string>())
 
-  const persistSpecUpgradeCache = useCallback(() => {
-    if (typeof window === 'undefined' || !window.localStorage) {
-      return
-    }
-    try {
-      const groupedByNetwork = new Map<NetworkId, Array<[number, UpgradeInfo]>>()
-      for (const [cacheKey, upgradeInfo] of specUpgradeCacheRef.current.entries()) {
-        const separatorIndex = cacheKey.indexOf(':')
-        if (separatorIndex === -1) {
-          continue
-        }
-        const networkId = cacheKey.slice(0, separatorIndex) as NetworkId
-        const specVersionValue = cacheKey.slice(separatorIndex + 1)
-        const specVersion = Number.parseInt(specVersionValue, 10)
-        if (!Number.isFinite(specVersion)) {
-          continue
-        }
-        const entriesForNetwork = groupedByNetwork.get(networkId)
-        const normalizedUpgrade: UpgradeInfo = {
-          blockNumber: Math.trunc(upgradeInfo.blockNumber),
-          timestampMs: upgradeInfo.timestampMs,
-        }
-        if (entriesForNetwork) {
-          entriesForNetwork.push([specVersion, normalizedUpgrade])
-        } else {
-          groupedByNetwork.set(networkId, [[specVersion, normalizedUpgrade]])
-        }
-      }
-
-      const persistedKeys = new Set<string>()
-      for (const [networkId, entries] of groupedByNetwork) {
-        const storageKey = getSpecUpgradeStorageKey(networkId)
-        persistedKeys.add(storageKey)
-        window.localStorage.setItem(storageKey, JSON.stringify(entries))
-      }
-
-      for (const [, storageKey] of NETWORK_STORAGE_KEYS) {
-        if (!persistedKeys.has(storageKey)) {
-          window.localStorage.removeItem(storageKey)
-        }
-      }
-
-      window.localStorage.removeItem(SPEC_UPGRADE_STORAGE_KEY)
-    } catch {
-      // Ignore storage errors so the app keeps working even if persistence fails.
-    }
+  const persistCache = useCallback(() => {
+    persistSpecUpgradeCache(specUpgradeCacheRef.current, NETWORK_STORAGE_KEYS)
   }, [])
 
   useEffect(() => {
@@ -148,11 +107,11 @@ export const useNetworkState = () => {
       } catch {
         // Ignore storage errors so the app keeps working even if persistence fails.
       }
-      persistSpecUpgradeCache()
+      persistCache()
     } else {
       window.localStorage.removeItem(SPEC_UPGRADE_STORAGE_KEY)
     }
-  }, [persistSpecUpgradeCache])
+  }, [persistCache])
 
   const resolveSpecUpgradeBlock = useCallback(
     async (api: ApiPromise, networkId: NetworkId, blockNumber: number, specVersion: number) => {
@@ -211,7 +170,7 @@ export const useNetworkState = () => {
       })
         .then((value) => {
           resolvedCache.set(cacheKey, value)
-          persistSpecUpgradeCache()
+          persistCache()
           promisesCache.delete(cacheKey)
           return value
         })
@@ -223,233 +182,167 @@ export const useNetworkState = () => {
       promisesCache.set(cacheKey, promise)
       return promise
     },
-    [persistSpecUpgradeCache],
+    [persistCache],
   )
 
-  const connectNetwork = useCallback(
-    async (networkId: NetworkId, forceReconnect = false) => {
-      const existingUnsubscribe = subscriptionsRef.current.get(networkId)
-      if (existingUnsubscribe) {
-        existingUnsubscribe()
-        subscriptionsRef.current.delete(networkId)
+  const connectNetwork = useCallback(async (networkId: NetworkId, forceReconnect = false) => {
+    const existingUnsubscribe = subscriptionsRef.current.get(networkId)
+    if (existingUnsubscribe) {
+      existingUnsubscribe()
+      subscriptionsRef.current.delete(networkId)
+    }
+    apisRef.current.delete(networkId)
+    for (const cacheKey of Array.from(pendingUpgradeRequestsRef.current)) {
+      if (cacheKey.startsWith(`${networkId}:`)) {
+        pendingUpgradeRequestsRef.current.delete(cacheKey)
       }
+    }
 
-      setNetworkState((previous) => ({
-        ...previous,
-        [networkId]: {},
-      }))
+    setNetworkState((previous) => ({
+      ...previous,
+      [networkId]: {},
+    }))
+
+    try {
+      const api = forceReconnect ? await refreshApi(networkId) : await getApi(networkId)
+      if (cancelledRef.current) {
+        await api.disconnect()
+        return
+      }
+      apisRef.current.set(networkId, api)
+
+      const handleHeader = async (header: Header) => {
+        try {
+          const blockHash = header.hash.toHex()
+          const blockNumber = header.number.toNumber()
+          const [timestampMs, specVersion] = await Promise.all([readTimestampMs(api, blockHash), readSpecVersion(api, blockHash)])
+          if (cancelledRef.current) {
+            return
+          }
+
+          setNetworkState((previous) => {
+            const current = previous[networkId]
+            const currentBlock = current?.blockNumber
+            if (currentBlock != null) {
+              if (blockNumber < currentBlock) {
+                return previous
+              }
+              if (blockNumber === currentBlock && !current?.error) {
+                const currentTimestamp = current?.timestampMs
+                if (currentTimestamp != null && timestampMs < currentTimestamp) {
+                  return previous
+                }
+                if (currentTimestamp === timestampMs) {
+                  const currentSpecVersion = current?.specVersion
+                  if (currentSpecVersion != null) {
+                    if (currentSpecVersion > specVersion) {
+                      return previous
+                    }
+                    if (currentSpecVersion === specVersion) {
+                      return previous
+                    }
+                  }
+                }
+              }
+            }
+
+            const nextUpgradedAt = current?.specVersion === specVersion ? current?.upgradedAt : undefined
+
+            return {
+              ...previous,
+              [networkId]: {
+                ...current,
+                blockNumber,
+                timestampMs,
+                specVersion,
+                upgradedAt: nextUpgradedAt,
+                upgradeError: undefined,
+                upgradeSearch: current?.specVersion === specVersion ? current?.upgradeSearch : undefined,
+                error: undefined,
+              },
+            }
+          })
+        } catch (error) {
+          if (cancelledRef.current) {
+            return
+          }
+          const blockNumber = header.number.toNumber()
+          setNetworkState((previous) => {
+            const current = previous[networkId]
+            const currentBlock = current?.blockNumber
+            if (currentBlock != null) {
+              if (currentBlock > blockNumber) {
+                return previous
+              }
+              if (currentBlock === blockNumber && current?.timestampMs != null) {
+                return previous
+              }
+            }
+
+            return {
+              ...previous,
+              [networkId]: {
+                ...current,
+                error: error instanceof Error ? error.message : String(error),
+                upgradeSearch: undefined,
+              },
+            }
+          })
+        }
+      }
 
       try {
-        const api = forceReconnect ? await refreshApi(networkId) : await getApi(networkId)
-        if (cancelledRef.current) {
-          await api.disconnect()
-          return
-        }
-
-        const handleHeader = async (header: Header) => {
-          try {
-            const blockHash = header.hash.toHex()
-            const blockNumber = header.number.toNumber()
-            const [timestampMs, specVersion] = await Promise.all([readTimestampMs(api, blockHash), readSpecVersion(api, blockHash)])
-            if (cancelledRef.current) {
-              return
-            }
-
-            let shouldFetchUpgrade = false
-
-            setNetworkState((previous) => {
-              const current = previous[networkId]
-              const currentBlock = current?.blockNumber
-              if (currentBlock != null) {
-                if (blockNumber < currentBlock) {
-                  shouldFetchUpgrade = false
-                  return previous
-                }
-                if (blockNumber === currentBlock && !current?.error) {
-                  const currentTimestamp = current?.timestampMs
-                  if (currentTimestamp != null && timestampMs < currentTimestamp) {
-                    shouldFetchUpgrade = false
-                    return previous
-                  }
-                  if (currentTimestamp === timestampMs) {
-                    const currentSpecVersion = current?.specVersion
-                    if (currentSpecVersion != null) {
-                      if (currentSpecVersion > specVersion) {
-                        shouldFetchUpgrade = false
-                        return previous
-                      }
-                      if (currentSpecVersion === specVersion) {
-                        shouldFetchUpgrade = current?.upgradedAt == null
-                        return previous
-                      }
-                    }
-                  }
-                }
-              }
-
-              const nextUpgradedAt = current?.specVersion === specVersion ? current?.upgradedAt : undefined
-              shouldFetchUpgrade = nextUpgradedAt == null
-
-              return {
-                ...previous,
-                [networkId]: {
-                  ...current,
-                  blockNumber,
-                  timestampMs,
-                  specVersion,
-                  upgradedAt: nextUpgradedAt,
-                  upgradeError: undefined,
-                  upgradeSearch: current?.specVersion === specVersion ? current?.upgradeSearch : undefined,
-                  error: undefined,
-                },
-              }
-            })
-
-            if (shouldFetchUpgrade) {
-              resolveSpecUpgradeBlock(api, networkId, blockNumber, specVersion)
-                .then((upgradedAt) => {
-                  if (cancelledRef.current) {
-                    return
-                  }
-                  setNetworkState((previous) => {
-                    const current = previous[networkId]
-                    if (!current) {
-                      return previous
-                    }
-                    const currentBlockNumber = current.blockNumber
-                    if (current.specVersion !== specVersion || (currentBlockNumber != null && currentBlockNumber < blockNumber)) {
-                      return previous
-                    }
-                    const currentUpgrade = current.upgradedAt
-                    if (
-                      current.error == null &&
-                      currentUpgrade?.blockNumber === upgradedAt.blockNumber &&
-                      currentUpgrade.timestampMs === upgradedAt.timestampMs
-                    ) {
-                      return previous
-                    }
-                    return {
-                      ...previous,
-                      [networkId]: {
-                        ...current,
-                        upgradedAt,
-                        upgradeError: undefined,
-                        upgradeSearch: undefined,
-                        error: undefined,
-                      },
-                    }
-                  })
-                })
-                .catch((error) => {
-                  if (cancelledRef.current) {
-                    return
-                  }
-                  const message = error instanceof Error ? error.message : String(error)
-                  const formattedMessage = `Failed to resolve runtime upgrade block: ${message}`
-                  setNetworkState((previous) => {
-                    const current = previous[networkId]
-                    if (!current) {
-                      return previous
-                    }
-                    const currentBlockNumber = current.blockNumber
-                    if (current.specVersion !== specVersion || (currentBlockNumber != null && currentBlockNumber < blockNumber)) {
-                      return previous
-                    }
-                    if (current.upgradeError === formattedMessage) {
-                      return previous
-                    }
-                    return {
-                      ...previous,
-                      [networkId]: {
-                        ...current,
-                        upgradeError: formattedMessage,
-                        upgradeSearch: undefined,
-                      },
-                    }
-                  })
-                })
-            }
-          } catch (error) {
-            if (cancelledRef.current) {
-              return
-            }
-            const blockNumber = header.number.toNumber()
-            setNetworkState((previous) => {
-              const current = previous[networkId]
-              const currentBlock = current?.blockNumber
-              if (currentBlock != null) {
-                if (currentBlock > blockNumber) {
-                  return previous
-                }
-                if (currentBlock === blockNumber && current?.timestampMs != null) {
-                  return previous
-                }
-              }
-
-              return {
-                ...previous,
-                [networkId]: {
-                  ...current,
-                  error: error instanceof Error ? error.message : String(error),
-                  upgradeSearch: undefined,
-                },
-              }
-            })
-          }
-        }
-
-        try {
-          const initialHash = await api.rpc.chain.getFinalizedHead()
-          const initialHeader = await api.rpc.chain.getHeader(initialHash)
-          await handleHeader(initialHeader)
-        } catch (error) {
-          if (!cancelledRef.current) {
-            setNetworkState((previous) => ({
-              ...previous,
-              [networkId]: {
-                ...previous[networkId],
-                error: error instanceof Error ? error.message : String(error),
-                upgradeSearch: undefined,
-              },
-            }))
-          }
-        }
-
-        const unsubscribe = await api.rpc.chain.subscribeFinalizedHeads((header) => {
-          handleHeader(header).catch((error) => {
-            if (cancelledRef.current) {
-              return
-            }
-            setNetworkState((previous) => ({
-              ...previous,
-              [networkId]: {
-                ...previous[networkId],
-                error: error instanceof Error ? error.message : String(error),
-                upgradeSearch: undefined,
-              },
-            }))
-          })
-        })
-
-        subscriptionsRef.current.set(networkId, () => {
-          unsubscribe()
-        })
+        const initialHash = await api.rpc.chain.getFinalizedHead()
+        const initialHeader = await api.rpc.chain.getHeader(initialHash)
+        await handleHeader(initialHeader)
       } catch (error) {
-        if (cancelledRef.current) {
-          return
+        if (!cancelledRef.current) {
+          setNetworkState((previous) => ({
+            ...previous,
+            [networkId]: {
+              ...previous[networkId],
+              error: error instanceof Error ? error.message : String(error),
+              upgradeSearch: undefined,
+            },
+          }))
         }
-        setNetworkState((previous) => ({
-          ...previous,
-          [networkId]: {
-            ...previous[networkId],
-            error: error instanceof Error ? error.message : String(error),
-            upgradeSearch: undefined,
-          },
-        }))
       }
-    },
-    [resolveSpecUpgradeBlock],
-  )
+
+      const unsubscribe = await api.rpc.chain.subscribeFinalizedHeads((header) => {
+        handleHeader(header).catch((error) => {
+          if (cancelledRef.current) {
+            return
+          }
+          setNetworkState((previous) => ({
+            ...previous,
+            [networkId]: {
+              ...previous[networkId],
+              error: error instanceof Error ? error.message : String(error),
+              upgradeSearch: undefined,
+            },
+          }))
+        })
+      })
+
+      subscriptionsRef.current.set(networkId, () => {
+        unsubscribe()
+        apisRef.current.delete(networkId)
+      })
+    } catch (error) {
+      if (cancelledRef.current) {
+        return
+      }
+      apisRef.current.delete(networkId)
+      setNetworkState((previous) => ({
+        ...previous,
+        [networkId]: {
+          ...previous[networkId],
+          error: error instanceof Error ? error.message : String(error),
+          upgradeSearch: undefined,
+        },
+      }))
+    }
+  }, [])
 
   useEffect(() => {
     cancelledRef.current = false
@@ -478,6 +371,104 @@ export const useNetworkState = () => {
       subscriptionsRef.current.clear()
     }
   }, [connectNetwork])
+
+  useEffect(() => {
+    if (cancelledRef.current) {
+      return
+    }
+
+    for (const [networkId, state] of Object.entries(networkState) as Array<[NetworkId, NetworkRowState | undefined]>) {
+      if (!state) {
+        continue
+      }
+      if (state.error) {
+        continue
+      }
+      const { blockNumber, specVersion, upgradedAt, upgradeError } = state
+      if (blockNumber == null || specVersion == null) {
+        continue
+      }
+      if (upgradedAt != null || upgradeError != null) {
+        continue
+      }
+      const api = apisRef.current.get(networkId)
+      if (!api) {
+        continue
+      }
+      const cacheKey = `${networkId}:${specVersion}`
+      if (pendingUpgradeRequestsRef.current.has(cacheKey)) {
+        continue
+      }
+
+      pendingUpgradeRequestsRef.current.add(cacheKey)
+
+      resolveSpecUpgradeBlock(api, networkId, blockNumber, specVersion)
+        .then((resolvedUpgrade) => {
+          if (cancelledRef.current) {
+            return
+          }
+          setNetworkState((previous) => {
+            const current = previous[networkId]
+            if (!current) {
+              return previous
+            }
+            const currentBlockNumber = current.blockNumber
+            if (current.specVersion !== specVersion || (currentBlockNumber != null && currentBlockNumber < blockNumber)) {
+              return previous
+            }
+            const currentUpgrade = current.upgradedAt
+            if (
+              current.error == null &&
+              currentUpgrade?.blockNumber === resolvedUpgrade.blockNumber &&
+              currentUpgrade.timestampMs === resolvedUpgrade.timestampMs
+            ) {
+              return previous
+            }
+            return {
+              ...previous,
+              [networkId]: {
+                ...current,
+                upgradedAt: resolvedUpgrade,
+                upgradeError: undefined,
+                upgradeSearch: undefined,
+                error: undefined,
+              },
+            }
+          })
+        })
+        .catch((error) => {
+          if (cancelledRef.current) {
+            return
+          }
+          const message = error instanceof Error ? error.message : String(error)
+          const formattedMessage = `Failed to resolve runtime upgrade block: ${message}`
+          setNetworkState((previous) => {
+            const current = previous[networkId]
+            if (!current) {
+              return previous
+            }
+            const currentBlockNumber = current.blockNumber
+            if (current.specVersion !== specVersion || (currentBlockNumber != null && currentBlockNumber < blockNumber)) {
+              return previous
+            }
+            if (current.upgradeError === formattedMessage) {
+              return previous
+            }
+            return {
+              ...previous,
+              [networkId]: {
+                ...current,
+                upgradeError: formattedMessage,
+                upgradeSearch: undefined,
+              },
+            }
+          })
+        })
+        .finally(() => {
+          pendingUpgradeRequestsRef.current.delete(cacheKey)
+        })
+    }
+  }, [networkState, resolveSpecUpgradeBlock])
 
   const handleRefresh = useCallback(
     (networkId: NetworkId) => {
